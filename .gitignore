@@ -46,3 +46,11 @@ $RECYCLE.BIN/
 *.bak
 *.db
 *.sqlite
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.backup
+.terraform.lock.hcl
+*.tfvars
+*.tfvars.json

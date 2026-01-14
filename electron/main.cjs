@@ -51,9 +51,11 @@ app.on('window-all-closed', () => {
 });
 
 const storage = require('./services/storage.cjs');
+const awsService = require('./services/aws.cjs');
 
 // IPC Handlers
 ipcMain.handle('ping', () => 'pong');
+ipcMain.handle('app:version', () => app.getVersion());
 
 ipcMain.handle('vault:save', async (_, { items, password, path }) => {
     return await storage.saveVault(items, password, path);
@@ -79,4 +81,47 @@ ipcMain.handle('dialog:saveFile', async () => {
     });
     if (canceled) return null;
     return filePath;
+});
+
+// AWS IPC Handlers
+ipcMain.handle('aws:listVaults', async (_, config) => {
+    return await awsService.listVaults(config);
+});
+
+ipcMain.handle('aws:getVault', async (_, { name, config }) => {
+    const buffer = await awsService.getVault(name, config);
+    // Convert Buffer to Uint8Array for IPC if necessary (though Electron handles Buffers)
+    return buffer;
+});
+
+ipcMain.handle('aws:putVault', async (_, { name, data, config }) => {
+    return await awsService.putVault(name, data, config);
+});
+
+ipcMain.handle('aws:deleteVault', async (_, { name, config }) => {
+    return await awsService.deleteVault(name, config);
+});
+
+// Helper for local backup/restore
+ipcMain.handle('vault:download', async (_, { name, data }) => {
+    const { canceled, filePath } = await dialog.showSaveDialog({
+        title: `Backup ${name}`,
+        defaultPath: name,
+        filters: [{ name: 'Encrypted Vault', extensions: ['enc'] }]
+    });
+    if (canceled || !filePath) return null;
+    fs.writeFileSync(filePath, data);
+    return filePath;
+});
+
+ipcMain.handle('vault:selectLocal', async () => {
+    const { canceled, filePaths } = await dialog.showOpenDialog({
+        title: 'Select Vault to Restore',
+        filters: [{ name: 'Encrypted Vault', extensions: ['enc'] }],
+        properties: ['openFile']
+    });
+    if (canceled || filePaths.length === 0) return null;
+    const filePath = filePaths[0];
+    const data = fs.readFileSync(filePath);
+    return { name: path.basename(filePath), data: data };
 });

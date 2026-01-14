@@ -405,17 +405,27 @@ function EditForm({ item, onSave, onCancel, genConfig, masterPassword }) {
     );
 }
 
-export default function Dashboard({ items, password, onUpdate, onLock, vaultPath, onSwitchVault, vaultLinks }) {
+export default function Dashboard({ items, password, onUpdate, onLock, onRefresh, vaultPath, onSwitchVault, vaultLinks, awsConfig, onOpenSettings }) {
     const [view, setView] = useState('vault');
+    const [isRefreshing, setIsRefreshing] = useState(false);
     const [searchTerm, setSearchTerm] = useState('');
+    const [appVersion, setAppVersion] = useState('');
 
     const [genConfig, setGenConfig] = useState({
-        length: 16,
-        includeSymbols: true,
-        includeNumbers: true,
+        length: 20,
         includeUppercase: true,
+        includeNumbers: true,
+        includeSymbols: true,
         excludeChars: ''
     });
+
+    useEffect(() => {
+        async function fetchVersion() {
+            const version = await window.electronAPI.getAppVersion();
+            setAppVersion(version);
+        }
+        fetchVersion();
+    }, []);
     const [generatedPass, setGeneratedPass] = useState('');
     const [showGenPass, setShowGenPass] = useState(false);
 
@@ -429,6 +439,30 @@ export default function Dashboard({ items, password, onUpdate, onLock, vaultPath
     const [newVaultPath, setNewVaultPath] = useState('');
     const [newVaultPass, setNewVaultPass] = useState('');
     const [showSwitchVault, setShowSwitchVault] = useState(false);
+    const [s3Vaults, setS3Vaults] = useState([]);
+
+    useEffect(() => {
+        if (awsConfig) {
+            loadS3Vaults();
+        }
+    }, [awsConfig]);
+
+    const loadS3Vaults = async () => {
+        try {
+            const config = {
+                endpoint: awsConfig.endpoint,
+                credentials: {
+                    accessKeyId: awsConfig.accessKeyId,
+                    secretAccessKey: awsConfig.secretAccessKey,
+                    region: awsConfig.region
+                }
+            };
+            const response = await window.electronAPI.listS3Vaults(config);
+            setS3Vaults(response.vaults);
+        } catch (e) {
+            console.error("Failed to load S3 vaults", e);
+        }
+    };
 
     // Vault Deletion State
     const [vaultToDelete, setVaultToDelete] = useState(null);
@@ -459,6 +493,18 @@ export default function Dashboard({ items, password, onUpdate, onLock, vaultPath
         }
     };
 
+    const handleRefreshClick = async () => {
+        setIsRefreshing(true);
+        const success = await onRefresh();
+        setIsRefreshing(false);
+        if (success) {
+            setToast('Vault Refreshed');
+        } else {
+            setToast('Refresh Failed');
+        }
+        setTimeout(() => setToast(null), 2000);
+    };
+
     const handleSaveItem = async (formData) => {
         const newItem = {
             id: editingItem?.id || crypto.randomUUID(),
@@ -479,7 +525,21 @@ export default function Dashboard({ items, password, onUpdate, onLock, vaultPath
             newItems = [...items, newItem];
         }
 
-        await window.electronAPI.saveVault(newItems, password, vaultPath);
+        if (awsConfig) {
+            const config = {
+                endpoint: awsConfig.endpoint,
+                credentials: {
+                    accessKeyId: awsConfig.accessKeyId,
+                    secretAccessKey: awsConfig.secretAccessKey,
+                    region: awsConfig.region
+                }
+            };
+            const result = await window.electronAPI.saveVault(newItems, password, 'TEMP_FOR_ENCRYPTION');
+            await window.electronAPI.putS3Vault(vaultPath || 'vault.enc', result.buffer, config);
+        } else {
+            await window.electronAPI.saveVault(newItems, password, vaultPath);
+        }
+
         onUpdate(newItems);
         setView('vault');
         setEditingItem(null);
@@ -488,7 +548,22 @@ export default function Dashboard({ items, password, onUpdate, onLock, vaultPath
     const confirmDelete = async () => {
         if (!itemToDelete) return;
         const newItems = items.filter(i => i.id !== itemToDelete);
-        await window.electronAPI.saveVault(newItems, password, vaultPath);
+
+        if (awsConfig) {
+            const config = {
+                endpoint: awsConfig.endpoint,
+                credentials: {
+                    accessKeyId: awsConfig.accessKeyId,
+                    secretAccessKey: awsConfig.secretAccessKey,
+                    region: awsConfig.region
+                }
+            };
+            const result = await window.electronAPI.saveVault(newItems, password, 'TEMP_FOR_ENCRYPTION');
+            await window.electronAPI.putS3Vault(vaultPath || 'vault.enc', result.buffer, config);
+        } else {
+            await window.electronAPI.saveVault(newItems, password, vaultPath);
+        }
+
         onUpdate(newItems);
         setItemToDelete(null);
     };
@@ -514,30 +589,96 @@ export default function Dashboard({ items, password, onUpdate, onLock, vaultPath
     };
 
     const handleCreateVault = async () => {
-        if (!newVaultName || !newVaultPath || !newVaultPass) return;
+        if (!newVaultName || !newVaultPass) return;
+        if (!awsConfig && !newVaultPath) return;
 
-        // 1. Create the new vault file
-        await window.electronAPI.saveVault([], newVaultPass, newVaultPath);
+        if (awsConfig) {
+            const targetName = newVaultName.endsWith('.enc') ? newVaultName : `${newVaultName}.enc`;
+            const config = {
+                endpoint: awsConfig.endpoint,
+                credentials: {
+                    accessKeyId: awsConfig.accessKeyId,
+                    secretAccessKey: awsConfig.secretAccessKey,
+                    region: awsConfig.region
+                }
+            };
+            const result = await window.electronAPI.saveVault([], newVaultPass, 'TEMP_FOR_ENCRYPTION');
+            await window.electronAPI.putS3Vault(targetName, result.buffer, config);
+            loadS3Vaults();
+        } else {
+            // Local creation (existing logic)
+            await window.electronAPI.saveVault([], newVaultPass, newVaultPath);
+            const linkItem = {
+                id: crypto.randomUUID(),
+                type: 'vault-link',
+                site: `Vault: ${newVaultName}`,
+                username: newVaultPath,
+                password: '',
+                notes: 'Linked Vault',
+                updatedAt: new Date().toISOString()
+            };
+            const newItems = [...items, linkItem];
+            await window.electronAPI.saveVault(newItems, password, vaultPath);
+            onUpdate(newItems);
+        }
 
-        // 2. Add link to current vault
-        const linkItem = {
-            id: crypto.randomUUID(),
-            type: 'vault-link',
-            site: `Vault: ${newVaultName}`,
-            username: newVaultPath, // Storing path in username field
-            password: '', // No password stored here
-            notes: 'Linked Vault',
-            updatedAt: new Date().toISOString()
-        };
-        const newItems = [...items, linkItem];
-        await window.electronAPI.saveVault(newItems, password, vaultPath);
-
-        onUpdate(newItems);
         setShowNewVault(false);
         setNewVaultName('');
         setNewVaultPath('');
         setNewVaultPass('');
-        setToast('New Vault Created & Linked!');
+        setToast('New Vault Created!');
+        setTimeout(() => setToast(null), 2000);
+    };
+
+    const handleDownloadBackup = async () => {
+        if (!awsConfig) return;
+        try {
+            const target = vaultPath || 'vault.enc';
+            const config = {
+                endpoint: awsConfig.endpoint,
+                credentials: {
+                    accessKeyId: awsConfig.accessKeyId,
+                    secretAccessKey: awsConfig.secretAccessKey,
+                    region: awsConfig.region
+                }
+            };
+            const buffer = await window.electronAPI.getS3Vault(target, config);
+            await window.electronAPI.downloadVault(target, buffer);
+            setToast('Backup saved successfully');
+        } catch (e) {
+            console.error(e);
+            setToast('Backup failed');
+        }
+        setTimeout(() => setToast(null), 2000);
+    };
+
+    const handleRestoreBackup = async () => {
+        if (!awsConfig) return;
+        try {
+            const localFile = await window.electronAPI.selectLocalVault();
+            if (!localFile) return;
+
+            if (s3Vaults.includes(localFile.name)) {
+                if (!window.confirm(`S3 already contains ${localFile.name}. Overwrite?`)) {
+                    return;
+                }
+            }
+
+            const config = {
+                endpoint: awsConfig.endpoint,
+                credentials: {
+                    accessKeyId: awsConfig.accessKeyId,
+                    secretAccessKey: awsConfig.secretAccessKey,
+                    region: awsConfig.region
+                }
+            };
+            await window.electronAPI.putS3Vault(localFile.name, localFile.data, config);
+            loadS3Vaults();
+            setToast(`Restored ${localFile.name} to Cloud`);
+        } catch (e) {
+            console.error(e);
+            setToast('Restore failed');
+        }
         setTimeout(() => setToast(null), 2000);
     };
 
@@ -597,9 +738,51 @@ export default function Dashboard({ items, password, onUpdate, onLock, vaultPath
                 )}
 
                 <div style={{ flex: 1 }}></div>
+
+                {awsConfig && (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginBottom: '1rem' }}>
+                        <button className="btn" onClick={handleDownloadBackup} style={{ background: '#334155', fontSize: '0.8rem' }}>
+                            📥 Backup Vault
+                        </button>
+                        <button className="btn" onClick={handleRestoreBackup} style={{ background: '#334155', fontSize: '0.8rem' }}>
+                            📤 Restore Vault
+                        </button>
+                    </div>
+                )}
+
+                <button className="btn" onClick={onOpenSettings} style={{ background: '#334155', marginBottom: '0.5rem' }}>
+                    ⚙️ Settings
+                </button>
+                <button
+                    className="btn"
+                    onClick={handleRefreshClick}
+                    disabled={isRefreshing}
+                    style={{
+                        background: '#334155',
+                        marginBottom: '0.5rem',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        gap: '0.5rem'
+                    }}
+                >
+                    <span style={{
+                        display: 'inline-block',
+                        transition: 'transform 0.5s ease',
+                        transform: isRefreshing ? 'rotate(360deg)' : 'rotate(0deg)',
+                        fontSize: '1.2rem'
+                    }}>
+                        🔄
+                    </span>
+                    Refresh
+                </button>
                 <button className="btn" onClick={onLock} style={{ background: 'var(--danger)' }}>
                     Lock Vault
                 </button>
+
+                <div style={{ marginTop: '1rem', textAlign: 'center', opacity: 0.4, fontSize: '0.7rem' }}>
+                    v{appVersion}
+                </div>
             </div>
 
             <div className="main-content" style={{ position: 'relative' }}>
@@ -729,8 +912,8 @@ export default function Dashboard({ items, password, onUpdate, onLock, vaultPath
                         <div style={{ width: '100%', maxWidth: '400px', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
                             <input className="input" placeholder="Vault Name (e.g. Work)" value={newVaultName} onChange={e => setNewVaultName(e.target.value)} />
                             <div style={{ display: 'flex', gap: '0.5rem' }}>
-                                <input className="input" placeholder="Path..." value={newVaultPath} readOnly style={{ flex: 1, opacity: 0.6 }} />
-                                <button className="btn" onClick={handleBrowseVaultLoc}>Browse</button>
+                                <input className="input" placeholder={awsConfig ? "Cloud Name (my-vault.enc)" : "Path..."} value={newVaultPath} readOnly={!awsConfig} onChange={e => awsConfig && setNewVaultPath(e.target.value)} style={{ flex: 1, opacity: awsConfig ? 1 : 0.6 }} />
+                                {!awsConfig && <button className="btn" onClick={handleBrowseVaultLoc}>Browse</button>}
                             </div>
                             <input className="input" type="password" placeholder="New Master Password" value={newVaultPass} onChange={e => setNewVaultPass(e.target.value)} />
                             <div style={{ display: 'flex', gap: '1rem', marginTop: '1rem' }}>
@@ -755,7 +938,16 @@ export default function Dashboard({ items, password, onUpdate, onLock, vaultPath
 
                             {displayVaultLinks.length === 0 && !vaultPath && <div style={{ opacity: 0.5 }}>No other vaults linked.</div>}
 
-                            {displayVaultLinks.map(link => (
+                            {awsConfig && s3Vaults.map(name => (
+                                <div key={name} style={{ display: 'flex', gap: '0.5rem' }}>
+                                    <button className="glass-panel" onClick={() => onSwitchVault(name)} style={{ flex: 1, padding: '1rem', textAlign: 'left', cursor: 'pointer', border: 'none', color: 'inherit', display: 'block' }}>
+                                        <div style={{ fontWeight: 'bold' }}>{name}</div>
+                                        <div style={{ fontSize: '0.8rem', opacity: 0.6 }}>Cloud S3 Vault</div>
+                                    </button>
+                                </div>
+                            ))}
+
+                            {!awsConfig && displayVaultLinks.map(link => (
                                 <div key={link.id} style={{ display: 'flex', gap: '0.5rem' }}>
                                     <button className="glass-panel" onClick={() => onSwitchVault(link.username)} style={{ flex: 1, padding: '1rem', textAlign: 'left', cursor: 'pointer', border: 'none', color: 'inherit', display: 'block' }}>
                                         <div style={{ fontWeight: 'bold' }}>{link.site}</div>

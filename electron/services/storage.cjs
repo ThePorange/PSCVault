@@ -12,28 +12,32 @@ const VAULT_FILE_PATH = path.join(USER_DATA_PATH, 'vault.enc');
  * @param {string} password - Master password
  * @param {string} [filePath] - Optional custom path (use default if null)
  */
-async function saveVault(items, password, filePath = null) {
+async function saveVault(items, password, filePath = null, returnBuffer = false) {
     const targetPath = filePath || VAULT_FILE_PATH;
-    // 1. Encrypt the new data first (so we know it worked before touching disk)
+    // 1. Encrypt the new data first
     const data = {
         updatedAt: new Date().toISOString(),
         items: items
     };
     const encryptedParams = await encrypt(data, password);
 
-    // 2. Backup the EXISTING file if it exists
-    try {
-        await fs.access(targetPath);
-        // File exists, create a backup
-        const backupPath = `${targetPath}.bak`;
-        await fs.copyFile(targetPath, backupPath);
-    } catch (e) {
-        // File doesn't exist (first run), or other error. Ignore.
+    if (returnBuffer) {
+        return { success: true, buffer: encryptedParams };
     }
 
-    // 3. Write the new file
-    await fs.writeFile(targetPath, encryptedParams);
-    return { success: true, path: targetPath };
+    if (filePath !== 'TEMP_FOR_ENCRYPTION') {
+        // 2. Backup the EXISTING file if it exists
+        try {
+            await fs.access(targetPath);
+            const backupPath = `${targetPath}.bak`;
+            await fs.copyFile(targetPath, backupPath);
+        } catch (e) { }
+
+        // 3. Write the new file
+        await fs.writeFile(targetPath, encryptedParams);
+    }
+
+    return { success: true, path: targetPath, buffer: encryptedParams };
 }
 
 /**
@@ -42,16 +46,24 @@ async function saveVault(items, password, filePath = null) {
  * @param {string} [filePath] - Optional custom path
  * @returns {Promise<object>} The vault data
  */
-async function loadVault(password, filePath = null) {
-    const targetPath = filePath || VAULT_FILE_PATH;
-    try {
-        await fs.access(targetPath);
-    } catch {
-        // File doesn't exist, return empty
-        return { items: [] };
+async function loadVault(password, filePathOrBuffer = null) {
+    let buffer;
+    // Check if we were passed a buffer directly OR an object containing a buffer (from S3)
+    if (Buffer.isBuffer(filePathOrBuffer)) {
+        buffer = filePathOrBuffer;
+    } else if (filePathOrBuffer && typeof filePathOrBuffer === 'object' && filePathOrBuffer.buffer) {
+        // If it's a raw Uint8Array/Buffer from the renderer, wrap it to be sure
+        buffer = Buffer.from(filePathOrBuffer.buffer);
+    } else {
+        const targetPath = filePathOrBuffer || VAULT_FILE_PATH;
+        try {
+            await fs.access(targetPath);
+        } catch {
+            return { items: [] };
+        }
+        buffer = await fs.readFile(targetPath);
     }
 
-    const buffer = await fs.readFile(targetPath);
     const data = await decrypt(buffer, password);
     return data;
 }
