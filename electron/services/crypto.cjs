@@ -49,8 +49,10 @@ async function encrypt(data, password) {
  * @param {string} password - Master password
  * @returns {Promise<object>} - Decrypted JSON object
  */
-async function decrypt(buffer, password) {
+async function decrypt(inputBuffer, password) {
     try {
+        // Ensure we are working with a real Buffer (handles Uint8Array from IPC)
+        const buffer = Buffer.from(inputBuffer);
         const salt = buffer.subarray(0, SALT_LENGTH);
         const iv = buffer.subarray(SALT_LENGTH, SALT_LENGTH + IV_LENGTH);
         const tag = buffer.subarray(SALT_LENGTH + IV_LENGTH, SALT_LENGTH + IV_LENGTH + TAG_LENGTH);
